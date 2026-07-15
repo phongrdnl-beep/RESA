@@ -1,7 +1,25 @@
 """
-Real Estate Market Sentiment Dashboard - Mock Backend API
-FastAPI service that simulates 4 data sources (Bao chi, Dien dan, MXH, Rao vat)
-and exposes JSON endpoints matching the frontend dashboard's data needs.
+Real Estate Market Sentiment Dashboard - Backend API
+FastAPI service backed by a REAL data pipeline: verified public RSS feeds
+from Vietnamese real-estate news outlets, scored with a transparent
+Vietnamese keyword-lexicon sentiment model (see sentiment.py), persisted
+to SQLite so genuine history accumulates over time (see storage.py).
+
+Honesty note (read this before trusting the numbers):
+  - "bao_chi" (news) is REAL - live RSS ingestion, every article has a
+    real source link you can open and check yourself.
+  - "dien_dan" (forums), "mxh" (social media) and "rao_vat" (classifieds)
+    have NO working free/public connector yet (see ingestion.py docstring
+    for why) and are reported as 0 articles / status=pending_connector
+    rather than being faked. /api/v1/sources tells you which is which.
+  - Historical trend depth is only as deep as real data goes: it starts
+    from whatever pubDates the first RSS pull covered, then grows by one
+    real calendar day every time /api/v1/ingest/run executes (wired to a
+    daily scheduled job). Early on this may be a short series - that is
+    correct behavior, not a bug.
+  - The old fully-synthetic generator from the mockup phase is still
+    available under /api/v1/demo/* for comparison/testing, clearly
+    separated so it can never be confused with the real endpoints.
 
 Run:
     pip install -r requirements.txt
@@ -13,12 +31,16 @@ Docs:
 
 import math
 import random
-from datetime import date, timedelta
-from typing import List, Literal
+from datetime import date, datetime, timedelta, timezone
+from typing import List, Literal, Optional
 
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
+import ingestion
+import storage
+from pipeline import run_ingestion
 
 # --------------------------------------------------------------------------
 # App setup
@@ -26,8 +48,9 @@ from pydantic import BaseModel
 
 app = FastAPI(
     title="Real Estate Market Sentiment API",
-    description="Mock backend cung cap du lieu cho Real Estate Market Sentiment Dashboard",
-    version="1.0.0",
+    description="Real-data backend (RSS ingestion + lexicon sentiment scoring) "
+    "for the Real Estate Market Sentiment Dashboard",
+    version="2.0.0",
 )
 
 app.add_middleware(
@@ -37,31 +60,25 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --------------------------------------------------------------------------
-# Config: 4 mock data sources with fixed impact weights (sum = 100)
-# --------------------------------------------------------------------------
-
-SOURCES = [
-    {"key": "bao_chi", "name": "Bao chi", "weight": 20, "color": "#62D7FF"},
-    {"key": "dien_dan", "name": "Dien dan", "weight": 30, "color": "#B15CFF"},
-    {"key": "mxh", "name": "Mang xa hoi", "weight": 15, "color": "#FF4FD8"},
-    {"key": "rao_vat", "name": "Rao vat", "weight": 35, "color": "#FFB000"},
-]
-
-TOTAL_DAYS = 730
-END_DATE = date(2026, 7, 15)
-RNG_SEED = 42
-DEFAULT_TOTAL_ARTICLES = 1284
-
 RangeKey = Literal["30d", "month", "quarter", "year", "all"]
+RANGE_DAYS = {"30d": 30, "month": 30, "quarter": 90, "year": 365, "all": 100000}
 
-RANGE_CONFIG = {
-    "30d": {"days": 30, "bucket": 1, "fmt": "short"},
-    "month": {"days": 30, "bucket": 1, "fmt": "short"},
-    "quarter": {"days": 90, "bucket": 3, "fmt": "short"},
-    "year": {"days": 365, "bucket": 7, "fmt": "short"},
-    "all": {"days": TOTAL_DAYS, "bucket": 14, "fmt": "long"},
+SOURCE_META = {
+    "bao_chi": {"name": "Bao chi", "color": "#62D7FF"},
+    "dien_dan": {"name": "Dien dan", "color": "#B15CFF"},
+    "mxh": {"name": "Mang xa hoi", "color": "#FF4FD8"},
+    "rao_vat": {"name": "Rao vat", "color": "#FFB000"},
 }
+
+
+@app.on_event("startup")
+def _startup():
+    storage.init_db()
+    try:
+        run_ingestion()
+    except Exception as exc:  # never let a flaky feed take the whole API down
+        print("Startup ingestion failed (will retry on next /ingest/run or scheduled call):", exc)
+
 
 # --------------------------------------------------------------------------
 # Response models
@@ -75,6 +92,8 @@ class SummaryResponse(BaseModel):
     state: str
     state_color: str
     updated_at: str
+    data_points_available: int
+    is_limited_history: bool
 
 
 class TrendResponse(BaseModel):
@@ -83,6 +102,8 @@ class TrendResponse(BaseModel):
     bullish: List[float]
     bearish: List[float]
     ma7: List[float]
+    data_points: int
+    is_limited_history: bool
 
 
 class SourceItem(BaseModel):
@@ -91,6 +112,7 @@ class SourceItem(BaseModel):
     weight_percent: float
     article_count: int
     color: str
+    status: str
 
 
 class SourceDistributionResponse(BaseModel):
@@ -100,10 +122,13 @@ class SourceDistributionResponse(BaseModel):
 
 class NewsItem(BaseModel):
     title: str
+    link: str
     source_platform: str
     sentiment_label: Literal["Bullish", "Bearish", "Neutral"]
     sentiment_label_vi: str
     impact_score: float
+    matched_keywords: List[str]
+    published_at: str
 
 
 class TopNewsResponse(BaseModel):
@@ -118,26 +143,206 @@ class DashboardResponse(BaseModel):
     top_news: TopNewsResponse
 
 
+class IngestResult(BaseModel):
+    fetched_this_run: int
+    new_articles: int
+    total_articles_stored: int
+    days_in_history: int
+    connector_status: dict
+
+
 # --------------------------------------------------------------------------
-# Mock data generation (deterministic - same seed as the frontend mockup)
+# Real-data readers (backed by storage.py / SQLite)
+# --------------------------------------------------------------------------
+
+_LABEL_VI_MAP = {"Bullish": "Hung phan", "Bearish": "Bi quan", "Neutral": "Trung tinh"}
+
+
+def _state_for(score: float):
+    if score >= 66.67:
+        return "Hung phan", "#3DDC84"
+    if score >= 33.33:
+        return "Trung lap", "#62D7FF"
+    return "Bi quan", "#FF7A3D"
+
+
+def _fmt_label(d_str: str, short: bool) -> str:
+    d = datetime.strptime(d_str, "%Y-%m-%d").date()
+    return f"{d.day}/{d.month}" if short else f"{d.month}/{d.year}"
+
+
+def _real_trend(range_key: RangeKey) -> TrendResponse:
+    days_wanted = RANGE_DAYS[range_key]
+    all_days = storage.get_daily_summaries()
+    subset = all_days[-days_wanted:] if days_wanted < len(all_days) else all_days
+
+    bullish = [d["bullish_pct"] for d in subset]
+    bearish = [d["bearish_pct"] for d in subset]
+    labels = [_fmt_label(d["date"], short=(range_key in ("30d", "month", "quarter"))) for d in subset]
+
+    ma7 = []
+    for i in range(len(bullish)):
+        window = bullish[max(0, i - 6): i + 1]
+        ma7.append(round(sum(window) / len(window), 1))
+
+    return TrendResponse(
+        range=range_key,
+        labels=labels,
+        bullish=bullish,
+        bearish=bearish,
+        ma7=ma7,
+        data_points=len(subset),
+        is_limited_history=len(subset) < min(days_wanted, 30),
+    )
+
+
+def _real_summary() -> SummaryResponse:
+    all_days = storage.get_daily_summaries()
+    if not all_days:
+        state, color = _state_for(50.0)
+        return SummaryResponse(
+            sentiment_score=50.0, wow_change_percent=0.0, articles_24h=0,
+            state=state, state_color=color,
+            updated_at=datetime.now(timezone.utc).isoformat(),
+            data_points_available=0, is_limited_history=True,
+        )
+    latest = all_days[-1]
+    score = latest["sentiment_index"]
+    if len(all_days) >= 8:
+        prev = all_days[-8]["sentiment_index"]
+    else:
+        prev = all_days[0]["sentiment_index"]
+    wow = round(((score - prev) / prev) * 100, 1) if prev else 0.0
+    state, color = _state_for(score)
+
+    since = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+    articles_24h = storage.count_articles_since(since)
+
+    return SummaryResponse(
+        sentiment_score=score, wow_change_percent=wow, articles_24h=articles_24h,
+        state=state, state_color=color,
+        updated_at=datetime.now(timezone.utc).isoformat(),
+        data_points_available=len(all_days), is_limited_history=len(all_days) < 8,
+    )
+
+
+def _real_sources() -> SourceDistributionResponse:
+    counts = storage.get_source_counts()
+    total = sum(counts.values())
+    items = []
+    for key, meta in SOURCE_META.items():
+        n = counts.get(key, 0)
+        items.append(SourceItem(
+            key=key, name=meta["name"],
+            weight_percent=round(100 * n / total, 1) if total else 0.0,
+            article_count=n, color=meta["color"],
+            status=ingestion.CONNECTORS[key]["status"],
+        ))
+    return SourceDistributionResponse(total_articles=total, sources=items)
+
+
+def _real_top_news(limit: int) -> TopNewsResponse:
+    rows = storage.get_top_articles(limit=limit)
+    items = [
+        NewsItem(
+            title=r["title"], link=r["link"],
+            source_platform=r["source_name"],
+            sentiment_label=r["sentiment_label"],
+            sentiment_label_vi=_LABEL_VI_MAP[r["sentiment_label"]],
+            impact_score=r["impact_score"],
+            matched_keywords=r["matched_keywords"],
+            published_at=r["published_at"],
+        )
+        for r in rows
+    ]
+    return TopNewsResponse(date=date.today().isoformat(), items=items)
+
+
+# --------------------------------------------------------------------------
+# Real-data endpoints (default / primary)
 # --------------------------------------------------------------------------
 
 
-def _seeded_rng() -> random.Random:
-    return random.Random(RNG_SEED)
+@app.get("/api/v1/health")
+def health():
+    return {"status": "ok"}
 
 
-def _generate_history():
-    """Sideways market for ~14 days, then a bullish rally (legal easing +
-    interest rate cut), replicated across a 2-year daily history."""
-    rng = _seeded_rng()
-    start_date = END_DATE - timedelta(days=TOTAL_DAYS - 1)
+@app.post("/api/v1/ingest/run", response_model=IngestResult)
+def ingest_run():
+    """Trigger a real ingestion pass: fetch RSS -> score -> persist.
+    Call this from a daily scheduled job to grow real history over time."""
+    return run_ingestion()
+
+
+@app.get("/api/v1/summary", response_model=SummaryResponse)
+def get_summary():
+    """Diem tam ly hien tai (real), tinh tu du lieu that da thu thap."""
+    return _real_summary()
+
+
+@app.get("/api/v1/trend", response_model=TrendResponse)
+def get_trend(range: RangeKey = Query("30d", description="30d | month | quarter | year | all")):
+    """Chuoi du lieu that cho bieu do xu huong. Do sau lich su phu thuoc so
+    ngay da chay ingestion that - xem is_limited_history."""
+    return _real_trend(range)
+
+
+@app.get("/api/v1/sources", response_model=SourceDistributionResponse)
+def get_sources():
+    """Ty trong nguon du lieu THAT. bao_chi = live; dien_dan/mxh/rao_vat
+    hien status=pending_connector (chua co API/RSS mien phi kha dung)."""
+    return _real_sources()
+
+
+@app.get("/api/v1/news/top", response_model=TopNewsResponse)
+def get_top_news(limit: int = Query(5, ge=1, le=20)):
+    """Top N bai viet that, sap xep theo impact score, kem link nguon that
+    de kiem chung."""
+    return _real_top_news(limit)
+
+
+@app.get("/api/v1/dashboard", response_model=DashboardResponse)
+def get_dashboard(range: RangeKey = Query("30d"), news_limit: int = Query(5, ge=1, le=20)):
+    """Endpoint tong hop - toan bo du lieu that can cho dashboard."""
+    return DashboardResponse(
+        summary=_real_summary(),
+        trend=_real_trend(range),
+        sources=_real_sources(),
+        top_news=_real_top_news(news_limit),
+    )
+
+
+# --------------------------------------------------------------------------
+# DEMO endpoints - the original fully-synthetic generator, kept only for
+# side-by-side comparison / UI testing. Never mixed with the real ones.
+# --------------------------------------------------------------------------
+
+_DEMO_TOTAL_DAYS = 730
+_DEMO_END_DATE = date(2026, 7, 15)
+_DEMO_SEED = 42
+_DEMO_SOURCES = [
+    {"key": "bao_chi", "name": "Bao chi", "weight": 20, "color": "#62D7FF"},
+    {"key": "dien_dan", "name": "Dien dan", "weight": 30, "color": "#B15CFF"},
+    {"key": "mxh", "name": "Mang xa hoi", "weight": 15, "color": "#FF4FD8"},
+    {"key": "rao_vat", "name": "Rao vat", "weight": 35, "color": "#FFB000"},
+]
+_DEMO_RANGE_CONFIG = {
+    "30d": {"days": 30, "bucket": 1, "fmt": "short"},
+    "month": {"days": 30, "bucket": 1, "fmt": "short"},
+    "quarter": {"days": 90, "bucket": 3, "fmt": "short"},
+    "year": {"days": 365, "bucket": 7, "fmt": "short"},
+    "all": {"days": _DEMO_TOTAL_DAYS, "bucket": 14, "fmt": "long"},
+}
+
+
+def _demo_generate_history():
+    rng = random.Random(_DEMO_SEED)
+    start_date = _DEMO_END_DATE - timedelta(days=_DEMO_TOTAL_DAYS - 1)
     dates, bullish, bearish = [], [], []
-
-    for i in range(TOTAL_DAYS):
+    for i in range(_DEMO_TOTAL_DAYS):
         d = start_date + timedelta(days=i)
-        days_from_end = TOTAL_DAYS - 1 - i
-
+        days_from_end = _DEMO_TOTAL_DAYS - 1 - i
         if days_from_end < 30:
             j = 29 - days_from_end
             if j < 14:
@@ -147,7 +352,6 @@ def _generate_history():
                 b = 48 + t * t * 22 + (rng.random() - 0.5) * 4
             else:
                 b = 74 + (rng.random() - 0.5) * 5 + math.sin(j) * 2
-
             if j < 14:
                 be = 44 + (rng.random() - 0.5) * 6
             elif j < 20:
@@ -158,172 +362,40 @@ def _generate_history():
         else:
             b = 50 + 15 * math.sin(days_from_end / 58) + 8 * math.sin(days_from_end / 17) + (rng.random() - 0.5) * 7
             be = 46 - 0.5 * (b - 50) + (rng.random() - 0.5) * 8
-
         bullish.append(round(max(min(b, 96), 4), 1))
         bearish.append(round(max(min(be, 90), 4), 1))
         dates.append(d)
-
     return dates, bullish, bearish
 
 
-def _moving_average(arr: List[float], window: int = 7) -> List[float]:
+_DEMO_DATES, _DEMO_BULLISH, _DEMO_BEARISH = _demo_generate_history()
+
+
+def _demo_ma7(arr):
     out = []
     for i in range(len(arr)):
-        s = max(0, i - window + 1)
-        chunk = arr[s : i + 1]
+        chunk = arr[max(0, i - 6): i + 1]
         out.append(round(sum(chunk) / len(chunk), 1))
     return out
 
 
-_DATES, _BULLISH, _BEARISH = _generate_history()
-_MA7 = _moving_average(_BULLISH)
+_DEMO_MA7 = _demo_ma7(_DEMO_BULLISH)
 
 
-def _fmt_date(d: date, fmt: str) -> str:
-    return f"{d.day}/{d.month}" if fmt == "short" else f"{d.month}/{d.year}"
+@app.get("/api/v1/demo/dashboard")
+def demo_dashboard(range_key: RangeKey = Query("30d", alias="range")):
+    """Original fully-synthetic mockup data (seeded RNG) - for comparison only."""
+    import builtins
 
-
-def _aggregate(arr: List[float], bucket: int) -> List[float]:
-    if bucket <= 1:
-        return arr[:]
-    out = []
-    for i in range(0, len(arr), bucket):
-        chunk = arr[i : i + bucket]
-        out.append(round(sum(chunk) / len(chunk), 1))
-    return out
-
-
-def _build_trend(range_key: RangeKey) -> TrendResponse:
-    cfg = RANGE_CONFIG[range_key]
-    start = len(_BULLISH) - cfg["days"]
-    b_slice = _BULLISH[start:]
-    be_slice = _BEARISH[start:]
-    ma_slice = _MA7[start:]
-    d_slice = _DATES[start:]
-
-    labels = []
-    for i in range(0, len(d_slice), cfg["bucket"]):
-        idx = min(i + cfg["bucket"] - 1, len(d_slice) - 1)
-        labels.append(_fmt_date(d_slice[idx], cfg["fmt"]))
-
-    return TrendResponse(
-        range=range_key,
-        labels=labels,
-        bullish=_aggregate(b_slice, cfg["bucket"]),
-        bearish=_aggregate(be_slice, cfg["bucket"]),
-        ma7=_aggregate(ma_slice, cfg["bucket"]),
-    )
-
-
-def _current_state(score: float):
-    if score >= 66.67:
-        return "Hung phan", "#3DDC84"
-    if score >= 33.33:
-        return "Trung lap", "#62D7FF"
-    return "Bi quan", "#FF7A3D"
-
-
-MOCK_NEWS_POOL = [
-    {"title": "NHNN chinh thuc ha lai suat dieu hanh, mo duong von cho bat dong san", "source": "bao_chi", "label": "Bullish", "score": 9.4},
-    {"title": "Go vuong phap ly hang loat du an tai TP.HCM, cap phep xay dung tro lai", "source": "bao_chi", "label": "Bullish", "score": 9.1},
-    {"title": "Dien dan nha dau tu: dong tien do manh vao can ho trung tam", "source": "dien_dan", "label": "Bullish", "score": 8.2},
-    {"title": "Rao vat can ho trung tam tang dot bien luot xem trong tuan qua", "source": "rao_vat", "label": "Bullish", "score": 7.8},
-    {"title": "Canh bao rui ro thanh khoan tai mot so du an tinh le", "source": "bao_chi", "label": "Bearish", "score": 6.5},
-    {"title": "Tam ly than trong van con voi phan khuc nghi duong", "source": "mxh", "label": "Neutral", "score": 5.3},
-    {"title": "Loat tin dang ban cat lo dat nen vung ven xuat hien tro lai", "source": "rao_vat", "label": "Bearish", "score": 6.1},
-    {"title": "Chuyen gia du bao mat bang gia can ho on dinh trong quy toi", "source": "dien_dan", "label": "Neutral", "score": 5.0},
-]
-
-_SOURCE_NAME_MAP = {s["key"]: s["name"] for s in SOURCES}
-_LABEL_VI_MAP = {"Bullish": "Hung phan", "Bearish": "Bi quan", "Neutral": "Trung tinh"}
-
-
-def _get_top_news(limit: int = 5) -> List[NewsItem]:
-    ranked = sorted(MOCK_NEWS_POOL, key=lambda x: x["score"], reverse=True)[:limit]
-    return [
-        NewsItem(
-            title=n["title"],
-            source_platform=_SOURCE_NAME_MAP[n["source"]],
-            sentiment_label=n["label"],
-            sentiment_label_vi=_LABEL_VI_MAP[n["label"]],
-            impact_score=n["score"],
-        )
-        for n in ranked
-    ]
-
-
-def _get_sources(total_articles: int) -> SourceDistributionResponse:
-    items = [
-        SourceItem(
-            key=s["key"],
-            name=s["name"],
-            weight_percent=s["weight"],
-            article_count=round(total_articles * s["weight"] / 100),
-            color=s["color"],
-        )
-        for s in SOURCES
-    ]
-    return SourceDistributionResponse(total_articles=total_articles, sources=items)
-
-
-def _get_summary() -> SummaryResponse:
-    score = _BULLISH[-1]
-    prev_week = _BULLISH[-8] if len(_BULLISH) > 8 else _BULLISH[0]
-    wow = round(((score - prev_week) / prev_week) * 100, 1) if prev_week else 0.0
-    state, color = _current_state(score)
-    return SummaryResponse(
-        sentiment_score=score,
-        wow_change_percent=wow,
-        articles_24h=DEFAULT_TOTAL_ARTICLES,
-        state=state,
-        state_color=color,
-        updated_at=f"{END_DATE.isoformat()}T08:00:00+07:00",
-    )
-
-
-# --------------------------------------------------------------------------
-# Endpoints
-# --------------------------------------------------------------------------
-
-
-@app.get("/api/v1/health")
-def health():
-    return {"status": "ok"}
-
-
-@app.get("/api/v1/summary", response_model=SummaryResponse)
-def get_summary():
-    """Diem tam ly hien tai, % thay doi tuan truoc, so bai viet quet duoc 24h."""
-    return _get_summary()
-
-
-@app.get("/api/v1/trend", response_model=TrendResponse)
-def get_trend(range: RangeKey = Query("30d", description="30d | month | quarter | year | all")):
-    """Chuoi du lieu cho bieu do xu huong: Bullish, Bearish, MA7."""
-    return _build_trend(range)
-
-
-@app.get("/api/v1/sources", response_model=SourceDistributionResponse)
-def get_sources(total_articles: int = Query(DEFAULT_TOTAL_ARTICLES, ge=0)):
-    """Ty trong 4 nguon du lieu: Bao chi 20%, Dien dan 30%, MXH 15%, Rao vat 35%."""
-    return _get_sources(total_articles)
-
-
-@app.get("/api/v1/news/top", response_model=TopNewsResponse)
-def get_top_news(limit: int = Query(5, ge=1, le=20)):
-    """Top N tin tuc/bai viet anh huong nhat, sap xep theo impact score."""
-    return TopNewsResponse(date=END_DATE.isoformat(), items=_get_top_news(limit))
-
-
-@app.get("/api/v1/dashboard", response_model=DashboardResponse)
-def get_dashboard(range: RangeKey = Query("30d"), news_limit: int = Query(5, ge=1, le=20)):
-    """Endpoint tong hop - tra ve toan bo du lieu can cho dashboard trong 1 request."""
-    return DashboardResponse(
-        summary=_get_summary(),
-        trend=_build_trend(range),
-        sources=_get_sources(DEFAULT_TOTAL_ARTICLES),
-        top_news=TopNewsResponse(date=END_DATE.isoformat(), items=_get_top_news(news_limit)),
-    )
+    cfg = _DEMO_RANGE_CONFIG[range_key]
+    start = len(_DEMO_BULLISH) - cfg["days"]
+    b, be, ma, d = _DEMO_BULLISH[start:], _DEMO_BEARISH[start:], _DEMO_MA7[start:], _DEMO_DATES[start:]
+    labels = [f"{d[min(i+cfg['bucket']-1, len(d)-1)].day}/{d[min(i+cfg['bucket']-1, len(d)-1)].month}" for i in builtins.range(0, len(d), cfg["bucket"])]
+    return {
+        "note": "THIS IS SYNTHETIC DEMO DATA, not real market data.",
+        "trend": {"labels": labels, "bullish": b[::cfg["bucket"]], "bearish": be[::cfg["bucket"]], "ma7": ma[::cfg["bucket"]]},
+        "sources": {"total_articles": 1284, "sources": _DEMO_SOURCES},
+    }
 
 
 if __name__ == "__main__":
