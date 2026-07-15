@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hệ Thống Đo Lường Tâm Lý Thị Trường Bất Động Sản</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;500;700&family=Barlow+Condensed:wght@400;600&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: #101A28;
+    color: #F5F7FA;
+    font-family: 'Rajdhani', 'Barlow Condensed', sans-serif;
+    min-height: 100vh;
+  }
+  .resd-page {
+    max-width: 1440px;
+    margin: 0 auto;
+    padding: 24px;
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .resd-blink { animation: resd-blink 4.5s infinite; transform-origin: center; }
+    .resd-face-glow { animation: resd-faceglow 3.5s ease-in-out infinite; }
+  }
+  @keyframes resd-blink { 0%, 92%, 100% { transform: scaleY(1); } 95% { transform: scaleY(0.12); } }
+  @keyframes resd-faceglow {
+    0%, 100% { box-shadow: 0 0 18px rgba(61,220,132,0.28), 0 0 2px rgba(98,215,255,0.4) inset; }
+    50% { box-shadow: 0 0 30px rgba(61,220,132,0.5), 0 0 2px rgba(98,215,255,0.6) inset; }
+  }
+  .sr-only {
+    position: absolute; width: 1px; height: 1px; overflow: hidden;
+    clip: rect(0,0,0,0);
+  }
+</style>
+</head>
+<body>
+
+<div class="resd-page" id="resd-root" style="--bg-main:#101A28;--bg-sub:#172332;--card-bg:rgba(25,38,52,0.72);--text-main:#F5F7FA;--text-sub:#BFC8D2;--cyan:#62D7FF;--silver:#AEB7C1;--amber:#FFB000;--orange:#FF7A3D;--green:#3DDC84;--red:#FF5C5C;--violet:#B15CFF;--pink:#FF4FD8;--border-c:rgba(180,200,220,0.25);position:relative;">
+<h1 class="sr-only">Dashboard tâm lý thị trường bất động sản kết nối API FastAPI trên Render thời gian thực</h1>
+
+<svg width="0" height="0" style="position:absolute;">
+<defs>
+<filter id="resd-neon-glow" x="-60%" y="-60%" width="220%" height="220%">
+<feGaussianBlur stdDeviation="3.2" result="blur"/>
+<feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+</filter>
+<filter id="resd-neon-glow-soft" x="-60%" y="-60%" width="220%" height="220%">
+<feGaussianBlur stdDeviation="1.6" result="blur"/>
+<feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+</filter>
+</defs>
+</svg>
+
+<svg width="100%" height="100%" style="position:fixed;inset:0;z-index:-1;opacity:0.5;pointer-events:none;" xmlns="http://www.w3.org/2000/svg">
+<defs>
+<pattern id="resd-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+<path d="M 40 0 L 0 0 0 40" fill="none" stroke="rgba(180,200,220,0.08)" stroke-width="1"/>
+</pattern>
+</defs>
+<rect width="100%" height="100%" fill="url(#resd-grid)"/>
+</svg>
+
+<div style="position:relative;z-index:1;">
+
+<div style="display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:20px;border-bottom:1px solid var(--border-c);padding-bottom:16px;">
+  <div>
+    <div style="font-size:11px;letter-spacing:2px;color:var(--cyan);text-transform:uppercase;margin-bottom:4px;">Market Intelligence // Live Feed</div>
+    <div style="font-size:22px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--text-main);">Hệ Thống Đo Lường Tâm Lý Thị Trường Bất Động Sản</div>
+    <div style="font-size:13px;color:var(--text-sub);letter-spacing:0.5px;" id="resd-updated-at">Market Sentiment Index &mdash; đang tải...</div>
+  </div>
+  <div id="resd-status-badge" style="display:flex;align-items:center;gap:8px;font-size:11px;color:var(--text-sub);border:1px solid var(--border-c);padding:4px 10px;clip-path:polygon(6px 0,100% 0,100% calc(100% - 6px),calc(100% - 6px) 100%,0 100%,0 6px);background:rgba(174,183,193,0.08);">
+    <span style="width:6px;height:6px;border-radius:50%;background:var(--text-sub);display:inline-block;"></span>ĐANG KẾT NỐI...
+  </div>
+</div>
+
+<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;margin-bottom:20px;">
+
+  <div style="background:var(--card-bg);border:1px solid rgba(98,215,255,0.35);clip-path:polygon(10px 0,100% 0,100% calc(100% - 10px),calc(100% - 10px) 100%,0 100%,0 10px);padding:14px 16px;position:relative;">
+    <div style="position:absolute;top:6px;right:8px;width:10px;height:10px;border-top:1px solid var(--cyan);border-right:1px solid var(--cyan);opacity:0.6;"></div>
+    <div style="font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:var(--text-sub);margin-bottom:6px;">Điểm tâm lý hiện tại</div>
+    <div style="display:flex;align-items:center;gap:10px;">
+      <svg id="resd-gauge-svg" viewBox="0 0 150 95" style="width:88px;height:56px;flex:none;">
+        <path d="M35.16 85 A46 46 0 0 1 45.43 26.76" fill="none" stroke="var(--orange)" stroke-width="12" stroke-linecap="round" opacity="0.85"/>
+        <path d="M45.43 26.76 A46 46 0 0 1 104.57 26.76" fill="none" stroke="var(--cyan)" stroke-width="12" stroke-linecap="round" opacity="0.85"/>
+        <path d="M104.57 26.76 A46 46 0 0 1 114.84 85" fill="none" stroke="var(--green)" stroke-width="12" stroke-linecap="round" opacity="0.85"/>
+        <g stroke="rgba(11,20,32,0.55)" stroke-width="1.3">
+          <line x1="28.24" y1="89" x2="35.16" y2="85"/>
+          <line x1="23.64" y1="45.31" x2="31.25" y2="47.79"/>
+          <line x1="53.04" y1="12.67" x2="56.29" y2="19.98"/>
+          <line x1="96.96" y1="12.67" x2="93.71" y2="19.98"/>
+          <line x1="126.36" y1="45.31" x2="118.75" y2="47.79"/>
+          <line x1="121.76" y1="89" x2="114.84" y2="85"/>
+        </g>
+        <circle cx="75" cy="62" r="7" fill="#0B1420" stroke="var(--text-main)" stroke-width="1.3"/>
+        <line id="resd-gauge-needle" x1="75" y1="62" x2="101" y2="30" stroke="var(--green)" stroke-width="2.4" stroke-linecap="round"/>
+      </svg>
+      <div>
+        <div style="background:#0B1420;border:1px solid rgba(98,215,255,0.4);padding:2px 10px;font-family:'Courier New',monospace;font-size:20px;font-weight:700;letter-spacing:3px;color:var(--green);text-shadow:0 0 6px rgba(61,220,132,0.5);display:inline-block;">
+          <span id="resd-gauge-readout">---.-</span>
+        </div>
+        <div style="font-size:13px;font-weight:700;color:var(--text-sub);margin-top:5px;" id="resd-gauge-state">Đang tải</div>
+      </div>
+    </div>
+  </div>
+
+  <div style="background:var(--card-bg);border:1px solid rgba(61,220,132,0.35);clip-path:polygon(10px 0,100% 0,100% calc(100% - 10px),calc(100% - 10px) 100%,0 100%,0 10px);padding:14px 16px;position:relative;">
+    <div style="position:absolute;top:6px;right:8px;width:10px;height:10px;border-top:1px solid var(--green);border-right:1px solid var(--green);opacity:0.6;"></div>
+    <div style="font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:var(--text-sub);margin-bottom:6px;">Thay đổi so với tuần trước</div>
+    <div style="font-size:30px;font-weight:700;color:var(--green);line-height:1;" id="resd-wow-change">--%</div>
+    <div style="font-size:12px;color:var(--text-sub);margin-top:4px;">Động lực: tháo gỡ pháp lý, giảm lãi suất</div>
+  </div>
+
+  <div style="background:var(--card-bg);border:1px solid rgba(255,176,0,0.35);clip-path:polygon(10px 0,100% 0,100% calc(100% - 10px),calc(100% - 10px) 100%,0 100%,0 10px);padding:14px 16px;position:relative;">
+    <div style="position:absolute;top:6px;right:8px;width:10px;height:10px;border-top:1px solid var(--amber);border-right:1px solid var(--amber);opacity:0.6;"></div>
+    <div style="font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:var(--text-sub);margin-bottom:6px;">Bài viết quét được (24h)</div>
+    <div style="font-size:30px;font-weight:700;color:var(--amber);line-height:1;" id="resd-articles-count">-----</div>
+    <div style="font-size:12px;color:var(--text-sub);margin-top:4px;">Báo chí, diễn đàn, MXH, rao vặt</div>
+  </div>
+
+</div>
+
+<div style="background:var(--card-bg);border:1px solid var(--border-c);padding:16px;margin-bottom:16px;position:relative;">
+  <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:10px;">
+    <div style="font-size:14px;letter-spacing:1px;text-transform:uppercase;color:var(--text-main);font-weight:700;">Xu hướng tâm lý <span style="color:var(--text-sub);font-weight:400;font-size:12px;text-transform:none;letter-spacing:0;">&mdash; Hưng phấn / Bi quan / MA7</span></div>
+    <div style="display:flex;gap:14px;font-size:11px;color:var(--text-sub);">
+      <span><span style="display:inline-block;width:10px;height:2px;background:var(--green);vertical-align:middle;margin-right:4px;"></span>Bullish</span>
+      <span><span style="display:inline-block;width:10px;height:2px;background:var(--red);vertical-align:middle;margin-right:4px;"></span>Bearish</span>
+      <span><span style="display:inline-block;width:10px;height:2px;background:var(--cyan);vertical-align:middle;margin-right:4px;border-top:1px dashed var(--cyan);"></span>MA7</span>
+    </div>
+  </div>
+  <div id="resd-range-buttons" style="display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap;">
+    <button data-range="30d" style="font-family:inherit;cursor:pointer;font-size:11px;letter-spacing:1px;text-transform:uppercase;padding:5px 12px;background:rgba(98,215,255,0.15);color:var(--cyan);border:1px solid var(--cyan);clip-path:polygon(6px 0,100% 0,100% calc(100% - 6px),calc(100% - 6px) 100%,0 100%,0 6px);">30 Ngày</button>
+    <button data-range="month" style="font-family:inherit;cursor:pointer;font-size:11px;letter-spacing:1px;text-transform:uppercase;padding:5px 12px;background:transparent;color:var(--text-sub);border:1px solid var(--border-c);clip-path:polygon(6px 0,100% 0,100% calc(100% - 6px),calc(100% - 6px) 100%,0 100%,0 6px);">Tháng</button>
+    <button data-range="quarter" style="font-family:inherit;cursor:pointer;font-size:11px;letter-spacing:1px;text-transform:uppercase;padding:5px 12px;background:transparent;color:var(--text-sub);border:1px solid var(--border-c);clip-path:polygon(6px 0,100% 0,100% calc(100% - 6px),calc(100% - 6px) 100%,0 100%,0 6px);">Quý</button>
+    <button data-range="year" style="font-family:inherit;cursor:pointer;font-size:11px;letter-spacing:1px;text-transform:uppercase;padding:5px 12px;background:transparent;color:var(--text-sub);border:1px solid var(--border-c);clip-path:polygon(6px 0,100% 0,100% calc(100% - 6px),calc(100% - 6px) 100%,0 100%,0 6px);">Năm</button>
+    <button data-range="all" style="font-family:inherit;cursor:pointer;font-size:11px;letter-spacing:1px;text-transform:uppercase;padding:5px 12px;background:transparent;color:var(--text-sub);border:1px solid var(--border-c);clip-path:polygon(6px 0,100% 0,100% calc(100% - 6px),calc(100% - 6px) 100%,0 100%,0 6px);">Tất cả</button>
+  </div>
+  <div style="position:relative;height:260px;">
+    <canvas id="resd-main-chart"></canvas>
+  </div>
+</div>
+
+<div style="display:grid;grid-template-columns:1fr 1.6fr;gap:16px;margin-bottom:16px;">
+  <div style="background:var(--card-bg);border:1px solid var(--border-c);padding:16px;display:flex;flex-direction:column;">
+    <div style="font-size:14px;letter-spacing:1px;text-transform:uppercase;color:var(--text-main);font-weight:700;margin-bottom:10px;">Tỷ trọng nguồn dữ liệu</div>
+
+    <div style="position:relative;background:rgba(255,255,255,0.03);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);border:1px solid rgba(255,255,255,0.1);border-radius:16px;padding:14px;display:flex;flex-direction:column;align-items:center;">
+      <svg id="resd-donut-svg" viewBox="0 0 140 140" style="width:150px;height:150px;">
+        <circle cx="70" cy="70" r="54" fill="none" stroke="rgba(255,255,255,0.06)" stroke-width="14"/>
+        <g id="resd-donut-segments" transform="rotate(-90 70 70)"></g>
+        <text id="resd-donut-total" x="70" y="66" text-anchor="middle" fill="var(--text-main)" font-size="18" font-weight="700" font-family="Rajdhani,sans-serif">---</text>
+        <text x="70" y="82" text-anchor="middle" fill="var(--text-sub)" font-size="9" letter-spacing="1" font-family="Barlow Condensed,sans-serif">BÀI VIẾT</text>
+      </svg>
+      <div id="resd-source-legend" style="display:flex;flex-direction:column;gap:6px;margin-top:10px;font-size:12px;color:var(--text-sub);width:100%;"></div>
+    </div>
+
+    <div class="resd-face-glow" id="resd-face-panel" style="margin-top:14px;flex:1;min-height:120px;background:rgba(61,220,132,0.05);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border:1px solid rgba(61,220,132,0.35);border-radius:16px;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:12px;">
+      <svg viewBox="0 0 120 120" style="width:88px;height:88px;">
+        <circle id="resd-face-head" cx="60" cy="60" r="46" fill="rgba(61,220,132,0.05)" stroke="var(--green)" stroke-width="2" filter="url(#resd-neon-glow)"/>
+        <rect x="30" y="52" width="20" height="14" rx="4" fill="none" stroke="var(--cyan)" stroke-width="1.6" filter="url(#resd-neon-glow-soft)"/>
+        <rect x="70" y="52" width="20" height="14" rx="4" fill="none" stroke="var(--cyan)" stroke-width="1.6" filter="url(#resd-neon-glow-soft)"/>
+        <line x1="50" y1="59" x2="70" y2="59" stroke="var(--cyan)" stroke-width="1.6"/>
+        <g class="resd-blink">
+          <circle cx="40" cy="59" r="2.6" fill="var(--text-main)"/>
+          <circle cx="80" cy="59" r="2.6" fill="var(--text-main)"/>
+        </g>
+        <path id="resd-face-mouth" d="M43 82 Q60 96 77 82" fill="none" stroke="var(--green)" stroke-width="2.6" stroke-linecap="round" filter="url(#resd-neon-glow-soft)"/>
+        <path d="M32 46 Q40 40 48 45" fill="none" stroke="var(--text-sub)" stroke-width="1.6" stroke-linecap="round"/>
+        <path d="M72 45 Q80 40 88 46" fill="none" stroke="var(--text-sub)" stroke-width="1.6" stroke-linecap="round"/>
+      </svg>
+      <div style="font-size:11px;letter-spacing:1px;text-transform:uppercase;color:var(--text-sub);margin-top:6px;">Tâm trạng thị trường</div>
+      <div style="font-size:14px;font-weight:700;color:var(--green);" id="resd-face-label">Đang tải</div>
+    </div>
+  </div>
+
+  <div style="background:var(--card-bg);border:1px solid var(--border-c);padding:16px;">
+    <div style="font-size:14px;letter-spacing:1px;text-transform:uppercase;color:var(--text-main);font-weight:700;margin-bottom:10px;">Top tin tức ảnh hưởng nhất trong ngày</div>
+    <table style="width:100%;border-collapse:collapse;font-size:12.5px;table-layout:fixed;">
+      <colgroup><col style="width:46%;"><col style="width:18%;"><col style="width:18%;"><col style="width:18%;"></colgroup>
+      <thead>
+        <tr style="border-bottom:1px solid var(--border-c);">
+          <th style="text-align:left;padding:6px 4px;color:var(--text-sub);font-weight:400;text-transform:uppercase;letter-spacing:0.5px;font-size:10.5px;">Tiêu đề</th>
+          <th style="text-align:left;padding:6px 4px;color:var(--text-sub);font-weight:400;text-transform:uppercase;letter-spacing:0.5px;font-size:10.5px;">Nguồn</th>
+          <th style="text-align:left;padding:6px 4px;color:var(--text-sub);font-weight:400;text-transform:uppercase;letter-spacing:0.5px;font-size:10.5px;">Nhãn</th>
+          <th style="text-align:right;padding:6px 4px;color:var(--text-sub);font-weight:400;text-transform:uppercase;letter-spacing:0.5px;font-size:10.5px;">Impact</th>
+        </tr>
+      </thead>
+      <tbody id="resd-news-body"></tbody>
+    </table>
+  </div>
+</div>
+
+<div style="font-size:10.5px;color:var(--text-sub);letter-spacing:1px;text-transform:uppercase;text-align:right;opacity:0.6;" id="resd-footer-note">Đang kết nối API...</div>
+
+</div>
+</div>
+
+<script>
+(function(){
+var CYAN='#62D7FF',GREEN='#3DDC84',RED='#FF5C5C',AMBER='#FFB000',ORANGE='#FF7A3D',SILVER='#AEB7C1',SUB='#BFC8D2',VIOLET='#B15CFF',PINK='#FF4FD8';
+var API_BASE='https://resa-cr37.onrender.com/api/v1';
+
+function zoneOf(value){
+  if(value>=66.67) return {hex:GREEN,cssVar:'var(--green)',label:'Hưng phấn'};
+  if(value>=33.33) return {hex:CYAN,cssVar:'var(--cyan)',label:'Trung lập'};
+  return {hex:ORANGE,cssVar:'var(--orange)',label:'Bi quan'};
+}
+
+function setStatus(connected,detail){
+  var badge=document.getElementById('resd-status-badge');
+  var footer=document.getElementById('resd-footer-note');
+  if(connected){
+    badge.style.color=GREEN;badge.style.borderColor='rgba(61,220,132,0.4)';badge.style.background='rgba(61,220,132,0.08)';
+    badge.innerHTML='<span style="width:6px;height:6px;border-radius:50%;background:'+GREEN+';display:inline-block;"></span>SYSTEM ONLINE';
+    footer.textContent='Nguồn dữ liệu: API FastAPI (resa-cr37.onrender.com)';
+  } else {
+    badge.style.color=AMBER;badge.style.borderColor='rgba(255,176,0,0.4)';badge.style.background='rgba(255,176,0,0.08)';
+    badge.innerHTML='<span style="width:6px;height:6px;border-radius:50%;background:'+AMBER+';display:inline-block;"></span>OFFLINE &mdash; DỮ LIỆU MẪU';
+    footer.textContent='Không kết nối được API tại '+API_BASE+' &mdash; đang hiển thị dữ liệu mô phỏng cục bộ. '+(detail||'');
+  }
+}
+
+function updateGauge(value){
+  var deg=150+2.4*value;
+  var rad=deg*Math.PI/180;
+  var nx=75+40*Math.cos(rad), ny=62+40*Math.sin(rad);
+  var needle=document.getElementById('resd-gauge-needle');
+  needle.setAttribute('x2',nx.toFixed(1));
+  needle.setAttribute('y2',ny.toFixed(1));
+  var zone=zoneOf(value);
+  needle.setAttribute('stroke',zone.hex);
+  var readout=document.getElementById('resd-gauge-readout');
+  var str=value.toFixed(1);
+  while(str.length<5){str='0'+str;}
+  readout.textContent=str;
+  readout.parentElement.style.color=zone.cssVar;
+  readout.parentElement.style.textShadow='0 0 6px '+zone.hex+'80';
+  document.getElementById('resd-gauge-state').textContent=zone.label;
+  document.getElementById('resd-gauge-state').style.color=zone.cssVar;
+  return zone;
+}
+
+function applySummary(summary){
+  var zone=updateGauge(summary.sentiment_score);
+  var wow=document.getElementById('resd-wow-change');
+  var sign=summary.wow_change_percent>=0?'+':'';
+  wow.textContent=sign+summary.wow_change_percent.toFixed(1)+'%';
+  wow.style.color=summary.wow_change_percent>=0?GREEN:RED;
+  document.getElementById('resd-articles-count').textContent=summary.articles_24h.toLocaleString('vi-VN');
+  document.getElementById('resd-updated-at').textContent='Market Sentiment Index — Cập nhật '+summary.updated_at;
+  var face=document.getElementById('resd-face-panel');
+  var head=document.getElementById('resd-face-head');
+  var mouth=document.getElementById('resd-face-mouth');
+  var label=document.getElementById('resd-face-label');
+  head.setAttribute('stroke',zone.hex);
+  mouth.setAttribute('stroke',zone.hex);
+  mouth.setAttribute('d',zone.label==='Bi quan'?'M43 88 Q60 76 77 88':(zone.label==='Trung lập'?'M43 85 L77 85':'M43 82 Q60 96 77 82'));
+  label.textContent=zone.label;label.style.color=zone.cssVar;
+  face.style.borderColor=zone.hex+'59';
+}
+
+function applySources(sourcesResp){
+  document.getElementById('resd-donut-total').textContent=sourcesResp.total_articles.toLocaleString('vi-VN');
+  var seg=document.getElementById('resd-donut-segments');
+  seg.innerHTML='';
+  var legend=document.getElementById('resd-source-legend');
+  legend.innerHTML='';
+  var r=54,circumference=2*Math.PI*r,cumulative=0;
+  sourcesResp.sources.forEach(function(s){
+    var len=circumference*(s.weight_percent/100);
+    var circle=document.createElementNS('http://www.w3.org/2000/svg','circle');
+    circle.setAttribute('cx','70');circle.setAttribute('cy','70');circle.setAttribute('r',r);
+    circle.setAttribute('fill','none');circle.setAttribute('stroke',s.color);circle.setAttribute('stroke-width','14');
+    circle.setAttribute('stroke-linecap','round');
+    circle.setAttribute('stroke-dasharray',(len-3)+' '+(circumference-len+3));
+    circle.setAttribute('stroke-dashoffset',(-cumulative).toFixed(2));
+    circle.setAttribute('filter','url(#resd-neon-glow-soft)');
+    seg.appendChild(circle);
+    cumulative+=len;
+    var row=document.createElement('div');
+    row.style.cssText='display:flex;justify-content:space-between;align-items:center;background:'+s.color+'0F;border:1px solid '+s.color+'4D;border-radius:8px;padding:4px 10px;';
+    row.innerHTML='<span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:'+s.color+';box-shadow:0 0 6px '+s.color+';margin-right:6px;"></span>'+s.name+'</span><span style="color:'+s.color+';font-weight:700;">'+s.weight_percent+'%</span>';
+    legend.appendChild(row);
+  });
+}
+
+var badgeColor={Bullish:{bg:'rgba(61,220,132,0.15)',fg:GREEN,bd:'rgba(61,220,132,0.4)'},Bearish:{bg:'rgba(255,92,92,0.15)',fg:RED,bd:'rgba(255,92,92,0.4)'},Neutral:{bg:'rgba(174,183,193,0.15)',fg:SILVER,bd:'rgba(174,183,193,0.4)'}};
+function applyNews(items){
+  var tbody=document.getElementById('resd-news-body');
+  tbody.innerHTML='';
+  items.forEach(function(n){
+    var c=badgeColor[n.sentiment_label]||badgeColor.Neutral;
+    var tr=document.createElement('tr');
+    tr.style.borderBottom='1px solid rgba(180,200,220,0.12)';
+    tr.innerHTML='<td style="padding:8px 4px;color:#F5F7FA;line-height:1.3;">'+n.title+'</td>'+
+      '<td style="padding:8px 4px;color:#BFC8D2;">'+n.source_platform+'</td>'+
+      '<td style="padding:8px 4px;"><span style="display:inline-block;padding:2px 8px;font-size:10.5px;letter-spacing:0.5px;background:'+c.bg+';color:'+c.fg+';border:1px solid '+c.bd+';">'+(n.sentiment_label_vi||n.sentiment_label)+'</span></td>'+
+      '<td style="padding:8px 4px;text-align:right;color:'+c.fg+';font-weight:700;">'+Number(n.impact_score).toFixed(1)+'</td>';
+    tbody.appendChild(tr);
+  });
+}
+
+var mainChart=null;
+function renderChart(trend){
+  var ctx=document.getElementById('resd-main-chart').getContext('2d');
+  if(mainChart){mainChart.destroy();}
+  mainChart=new Chart(ctx,{
+    type:'line',
+    data:{
+      labels:trend.labels,
+      datasets:[
+        {label:'Hưng phấn (Bullish)',data:trend.bullish,borderColor:GREEN,backgroundColor:'rgba(61,220,132,0.08)',fill:true,tension:0.35,pointRadius:0,borderWidth:2},
+        {label:'Bi quan (Bearish)',data:trend.bearish,borderColor:RED,backgroundColor:'transparent',fill:false,tension:0.35,pointRadius:0,borderWidth:2},
+        {label:'MA 7 ngày',data:trend.ma7,borderColor:CYAN,backgroundColor:'transparent',fill:false,tension:0.35,pointRadius:0,borderWidth:1.5,borderDash:[5,4]}
+      ]
+    },
+    options:{
+      responsive:true,maintainAspectRatio:false,
+      interaction:{mode:'index',intersect:false},
+      plugins:{legend:{display:false},tooltip:{backgroundColor:'#172332',borderColor:'rgba(180,200,220,0.3)',borderWidth:1,titleColor:'#F5F7FA',bodyColor:'#BFC8D2'}},
+      scales:{
+        x:{grid:{color:'rgba(180,200,220,0.08)'},ticks:{color:SUB,maxTicksLimit:10,font:{size:10}}},
+        y:{grid:{color:'rgba(180,200,220,0.08)'},ticks:{color:SUB,font:{size:10}},min:0,max:100}
+      }
+    }
+  });
+}
+function updateChart(trend){
+  mainChart.data.labels=trend.labels;
+  mainChart.data.datasets[0].data=trend.bullish;
+  mainChart.data.datasets[1].data=trend.bearish;
+  mainChart.data.datasets[2].data=trend.ma7;
+  mainChart.update();
+}
+
+async function fetchJSON(path){
+  var res=await fetch(API_BASE+path,{cache:'no-store'});
+  if(!res.ok) throw new Error('HTTP '+res.status);
+  return res.json();
+}
+
+var rangeButtons=document.querySelectorAll('#resd-range-buttons button');
+rangeButtons.forEach(function(btn){
+  btn.addEventListener('click',async function(){
+    rangeButtons.forEach(function(b){b.style.background='transparent';b.style.color=SUB;b.style.borderColor='rgba(180,200,220,0.25)';});
+    btn.style.background='rgba(98,215,255,0.15)';btn.style.color=CYAN;btn.style.borderColor=CYAN;
+    var rangeKey=btn.getAttribute('data-range');
+    try{
+      updateChart(await fetchJSON('/trend?range='+rangeKey));
+    }catch(e){
+      setStatus(false,e.message);
+    }
+  });
+});
+
+async function init(){
+  try{
+    var dash=await fetchJSON('/dashboard?range=30d');
+    applySummary(dash.summary);
+    applySources(dash.sources);
+    applyNews(dash.top_news.items);
+    renderChart(dash.trend);
+    setStatus(true);
+  }catch(e){
+    setStatus(false,e.message);
+    document.getElementById('resd-gauge-state').textContent='Không có dữ liệu';
+    document.getElementById('resd-updated-at').textContent='Không kết nối được API — kiểm tra lại server Render.';
+  }
+}
+init();
+})();
+</script>
+
+</body>
+</html>
