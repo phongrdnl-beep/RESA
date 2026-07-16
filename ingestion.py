@@ -1,26 +1,30 @@
 """
 Real data ingestion connectors.
 
-Only "bao_chi" (news) has a working, free, public connector right now -
-verified RSS feeds from major Vietnamese outlets. RSS is the legitimate,
-ToS-friendly way to consume these headlines (it is the publisher's own
-public syndication feed, not scraping behind their UI).
+"bao_chi" (news) - verified RSS feeds from major Vietnamese outlets. RSS is
+the legitimate, ToS-friendly way to consume these headlines (it is the
+publisher's own public syndication feed, not scraping behind their UI).
 
-"dien_dan" (forums), "mxh" (social media) and "rao_vat" (classifieds) do
-NOT have a free/public API that can be wired up without either (a) a
-developer app + review process (Facebook Graph API, TikTok API) or
-(b) a private partnership (Chotot/Nhatot, batdongsan.com.vn do not expose
-a public listings API). Those connectors are stubbed out below and
-clearly return empty results with a "pending_connector" status instead
-of being faked with random data - see README_DATA_PIPELINE.md.
+"mxh" (social media) - YouTube Data API v3 (official, free, no App Review
+needed - just an API key). Pulls top comments from recent Vietnamese
+real-estate related videos. Only activates once YOUTUBE_API_KEY is set;
+until then it degrades to empty results rather than failing.
+
+"dien_dan" (forums) and "rao_vat" (classifieds) still have no working
+free/public API - see README_DATA_PIPELINE.md. Both can also receive real
+data through the manual /api/v1/contribute endpoint (main.py), which lets
+a human paste in a real post they read themselves - zero ToS risk since
+nothing is scraped or automated, and the source stays 100% real/verifiable.
 """
 
 import logging
+import os
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import List, TypedDict
 
 import feedparser
+import requests
 
 logger = logging.getLogger("ingestion")
 
@@ -101,11 +105,74 @@ def fetch_dien_dan() -> List[RawArticle]:
     return []
 
 
-def fetch_mxh() -> List[RawArticle]:
-    """STUB - social platforms (Facebook/TikTok/Zalo) require an authorized,
-    app-reviewed API with a developer account; not obtainable autonomously.
-    Returns empty on purpose."""
-    return []
+YOUTUBE_SEARCH_QUERIES = [
+    "bat dong san viet nam",
+    "thi truong nha dat 2026",
+]
+YOUTUBE_API_BASE = "https://www.googleapis.com/youtube/v3"
+
+
+def fetch_mxh(max_videos_per_query: int = 3, max_comments_per_video: int = 15) -> List[RawArticle]:
+    """YouTube Data API v3 connector. Requires the YOUTUBE_API_KEY env var
+    (free key from Google Cloud Console, no App Review required). Returns
+    empty (not an error) if the key isn't configured yet."""
+    api_key = os.environ.get("YOUTUBE_API_KEY")
+    if not api_key:
+        return []
+
+    articles: List[RawArticle] = []
+    try:
+        for query in YOUTUBE_SEARCH_QUERIES:
+            search_resp = requests.get(
+                f"{YOUTUBE_API_BASE}/search",
+                params={
+                    "key": api_key, "q": query, "part": "snippet", "type": "video",
+                    "order": "date", "maxResults": max_videos_per_query,
+                    "regionCode": "VN", "relevanceLanguage": "vi",
+                },
+                timeout=15,
+            )
+            search_resp.raise_for_status()
+            video_items = search_resp.json().get("items", [])
+
+            for item in video_items:
+                video_id = item.get("id", {}).get("videoId")
+                video_title = item.get("snippet", {}).get("title", "")
+                if not video_id:
+                    continue
+                try:
+                    comments_resp = requests.get(
+                        f"{YOUTUBE_API_BASE}/commentThreads",
+                        params={
+                            "key": api_key, "videoId": video_id, "part": "snippet",
+                            "order": "relevance", "maxResults": max_comments_per_video,
+                            "textFormat": "plainText",
+                        },
+                        timeout=15,
+                    )
+                    if comments_resp.status_code != 200:
+                        continue  # comments disabled on this video - skip, don't fail the run
+                    for c in comments_resp.json().get("items", []):
+                        top = c.get("snippet", {}).get("topLevelComment", {}).get("snippet", {})
+                        text = (top.get("textDisplay") or "").strip()
+                        if not text or len(text) < 8:
+                            continue
+                        articles.append(
+                            RawArticle(
+                                title=text[:200],
+                                description=f"Binh luan tren video: {video_title}",
+                                link=f"https://www.youtube.com/watch?v={video_id}",
+                                source_key="mxh",
+                                source_name="YouTube",
+                                published_at=top.get("publishedAt", datetime.now(timezone.utc).isoformat()),
+                            )
+                        )
+                except Exception as exc:
+                    logger.warning("YouTube comments fetch failed for video %s: %s", video_id, exc)
+                    continue
+    except Exception as exc:
+        logger.warning("YouTube search failed: %s", exc)
+    return articles
 
 
 def fetch_rao_vat() -> List[RawArticle]:
@@ -114,11 +181,13 @@ def fetch_rao_vat() -> List[RawArticle]:
     return []
 
 
+# "status" here is just a static label for docs/OpenAPI; main.py computes the
+# REAL status per source dynamically from actual article counts in storage.
 CONNECTORS = {
     "bao_chi": {"fn": fetch_bao_chi, "name": "Bao chi", "status": "live"},
-    "dien_dan": {"fn": fetch_dien_dan, "name": "Dien dan", "status": "pending_connector"},
-    "mxh": {"fn": fetch_mxh, "name": "Mang xa hoi", "status": "pending_connector"},
-    "rao_vat": {"fn": fetch_rao_vat, "name": "Rao vat", "status": "pending_connector"},
+    "dien_dan": {"fn": fetch_dien_dan, "name": "Dien dan", "status": "manual_contribute_only"},
+    "mxh": {"fn": fetch_mxh, "name": "Mang xa hoi", "status": "live_if_youtube_key_set"},
+    "rao_vat": {"fn": fetch_rao_vat, "name": "Rao vat", "status": "manual_contribute_only"},
 }
 
 

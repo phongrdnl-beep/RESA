@@ -30,17 +30,21 @@ Docs:
 """
 
 import math
+import os
 import random
 from datetime import date, datetime, timedelta, timezone
 from typing import List, Literal, Optional
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from fastapi.responses import HTMLResponse
+from pydantic import BaseModel, Field
 
 import ingestion
 import storage
+import trends
 from pipeline import run_ingestion
+from sentiment import score_article
 
 # --------------------------------------------------------------------------
 # App setup
@@ -227,6 +231,10 @@ def _real_summary() -> SummaryResponse:
 
 
 def _real_sources() -> SourceDistributionResponse:
+    """Status is computed from what's ACTUALLY in storage, not from static
+    connector config - a source only shows 'live' once it genuinely has
+    real articles stored, whether they arrived via an automated connector
+    (RSS, YouTube) or a manual /api/v1/contribute submission."""
     counts = storage.get_source_counts()
     total = sum(counts.values())
     items = []
@@ -236,7 +244,7 @@ def _real_sources() -> SourceDistributionResponse:
             key=key, name=meta["name"],
             weight_percent=round(100 * n / total, 1) if total else 0.0,
             article_count=n, color=meta["color"],
-            status=ingestion.CONNECTORS[key]["status"],
+            status="live" if n > 0 else "pending_connector",
         ))
     return SourceDistributionResponse(total_articles=total, sources=items)
 
@@ -311,6 +319,131 @@ def get_dashboard(range: RangeKey = Query("30d"), news_limit: int = Query(5, ge=
         sources=_real_sources(),
         top_news=_real_top_news(news_limit),
     )
+
+
+# --------------------------------------------------------------------------
+# Manual contribution - a human pastes a real post they read themselves.
+# No scraping, no automation touching Facebook/Zalo/forum logins - this is
+# the zero-ToS-risk way to get real dien_dan/mxh/rao_vat data in.
+# Protected by a shared token (set CONTRIBUTE_TOKEN on Render) so random
+# visitors can't pollute the index.
+# --------------------------------------------------------------------------
+
+
+class ContributeRequest(BaseModel):
+    title: str = Field(..., min_length=5, max_length=500)
+    description: str = Field("", max_length=2000)
+    link: str = Field(..., min_length=5, max_length=1000)
+    source_key: Literal["dien_dan", "mxh", "rao_vat", "bao_chi"] = "dien_dan"
+    source_name: str = Field("Dong gop thu cong", max_length=100)
+
+
+class ContributeResult(BaseModel):
+    accepted: bool
+    sentiment_score: float
+    sentiment_label: str
+    impact_score: float
+    matched_keywords: List[str]
+
+
+def _check_contribute_token(x_contribute_token: Optional[str]):
+    expected = os.environ.get("CONTRIBUTE_TOKEN")
+    if not expected:
+        raise HTTPException(status_code=503, detail="CONTRIBUTE_TOKEN chua duoc cau hinh tren server.")
+    if x_contribute_token != expected:
+        raise HTTPException(status_code=401, detail="Token khong dung.")
+
+
+@app.post("/api/v1/contribute", response_model=ContributeResult)
+def contribute(payload: ContributeRequest, x_contribute_token: Optional[str] = Header(None)):
+    """Nop mot bai viet THAT ban tu doc duoc (dien dan/Facebook/Zalo/rao vat).
+    Can header X-Contribute-Token khop voi bien moi truong CONTRIBUTE_TOKEN."""
+    _check_contribute_token(x_contribute_token)
+
+    score, label, impact, matched = score_article(payload.title, payload.description)
+    article = {
+        "link": payload.link, "title": payload.title, "description": payload.description,
+        "source_key": payload.source_key, "source_name": payload.source_name,
+        "published_at": datetime.now(timezone.utc).isoformat(),
+        "sentiment_score": score, "sentiment_label": label,
+        "impact_score": impact, "matched_keywords": matched,
+    }
+    inserted = storage.upsert_articles([article])
+    storage.recompute_daily_summary()
+    return ContributeResult(
+        accepted=inserted > 0, sentiment_score=score, sentiment_label=label,
+        impact_score=impact, matched_keywords=matched,
+    )
+
+
+@app.get("/contribute", response_class=HTMLResponse)
+def contribute_form():
+    """Form HTML don gian de dan bai viet ma khong can Postman/curl."""
+    return """
+    <!DOCTYPE html><html lang="vi"><head><meta charset="UTF-8">
+    <title>Dong gop bai viet - RESA</title>
+    <style>
+      body{font-family:sans-serif;max-width:560px;margin:40px auto;padding:0 16px;color:#222}
+      label{display:block;margin-top:14px;font-weight:600}
+      input,textarea,select{width:100%;padding:8px;margin-top:4px;box-sizing:border-box;font-size:14px}
+      button{margin-top:18px;padding:10px 20px;font-size:14px;cursor:pointer}
+      #result{margin-top:18px;padding:12px;border-radius:6px;display:none}
+    </style></head><body>
+    <h2>Dong gop bai viet that (dien dan / Facebook / Zalo / rao vat)</h2>
+    <form id="f">
+      <label>Token</label><input type="password" id="token" required>
+      <label>Nguon</label>
+      <select id="source_key">
+        <option value="dien_dan">Dien dan</option>
+        <option value="mxh">Mang xa hoi (Facebook/Zalo)</option>
+        <option value="rao_vat">Rao vat</option>
+      </select>
+      <label>Ten nguon (vd: Group Dau tu BDS, Zalo group ABC)</label>
+      <input type="text" id="source_name" placeholder="Dong gop thu cong">
+      <label>Tieu de / noi dung chinh *</label>
+      <textarea id="title" rows="3" required></textarea>
+      <label>Mo ta them (tuy chon)</label>
+      <textarea id="description" rows="2"></textarea>
+      <label>Link nguon *</label>
+      <input type="url" id="link" required placeholder="https://...">
+      <button type="submit">Gui va cham diem</button>
+    </form>
+    <div id="result"></div>
+    <script>
+    document.getElementById('f').addEventListener('submit', async function(e){
+      e.preventDefault();
+      var r = document.getElementById('result');
+      r.style.display='block'; r.style.background='#eee'; r.textContent='Dang gui...';
+      try{
+        var res = await fetch('/api/v1/contribute', {
+          method:'POST',
+          headers:{'Content-Type':'application/json','X-Contribute-Token':document.getElementById('token').value},
+          body: JSON.stringify({
+            title: document.getElementById('title').value,
+            description: document.getElementById('description').value,
+            link: document.getElementById('link').value,
+            source_key: document.getElementById('source_key').value,
+            source_name: document.getElementById('source_name').value || 'Dong gop thu cong'
+          })
+        });
+        var data = await res.json();
+        if(!res.ok){ r.style.background='#fdd'; r.textContent='Loi: '+(data.detail||res.status); return; }
+        r.style.background = data.sentiment_label==='Bullish' ? '#dfd' : (data.sentiment_label==='Bearish' ? '#fdd' : '#eef');
+        r.textContent = 'Da luu. Nhan: '+data.sentiment_label+' ('+data.sentiment_score+' diem), impact '+data.impact_score+'. Tu khoa: '+data.matched_keywords.join(', ');
+        document.getElementById('f').reset();
+      }catch(err){ r.style.background='#fdd'; r.textContent='Loi mang: '+err; }
+    });
+    </script>
+    </body></html>
+    """
+
+
+@app.get("/api/v1/trends/search-interest")
+def get_search_interest(keywords: Optional[str] = Query(None, description="Comma-separated, max 5")):
+    """Google Trends - muc do quan tam tim kiem (KHONG phai sentiment, chi la
+    tin hieu bo sung). keywords rong = dung bo tu khoa mac dinh."""
+    kw_list = [k.strip() for k in keywords.split(",")] if keywords else None
+    return trends.get_search_interest(kw_list)
 
 
 # --------------------------------------------------------------------------
