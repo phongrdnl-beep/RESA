@@ -331,8 +331,8 @@ def get_dashboard(range: RangeKey = Query("30d"), news_limit: int = Query(5, ge=
 
 
 class ContributeRequest(BaseModel):
-    title: str = Field(..., min_length=5, max_length=500)
-    description: str = Field("", max_length=2000)
+    title: str = Field(..., min_length=5, max_length=5000)
+    description: str = Field("", max_length=5000)
     link: str = Field(..., min_length=5, max_length=1000)
     source_key: Literal["dien_dan", "mxh", "rao_vat", "bao_chi"] = "dien_dan"
     source_name: str = Field("Dong gop thu cong", max_length=100)
@@ -427,7 +427,15 @@ def contribute_form():
           })
         });
         var data = await res.json();
-        if(!res.ok){ r.style.background='#fdd'; r.textContent='Loi: '+(data.detail||res.status); return; }
+        if(!res.ok){
+          var msg = res.status;
+          if (Array.isArray(data.detail)) {
+            msg = data.detail.map(function(e){ return (e.loc ? e.loc.join('.')+': ' : '') + e.msg; }).join(' | ');
+          } else if (typeof data.detail === 'string') {
+            msg = data.detail;
+          }
+          r.style.background='#fdd'; r.textContent='Loi: '+msg; return;
+        }
         r.style.background = data.sentiment_label==='Bullish' ? '#dfd' : (data.sentiment_label==='Bearish' ? '#fdd' : '#eef');
         r.textContent = 'Da luu. Nhan: '+data.sentiment_label+' ('+data.sentiment_score+' diem), impact '+data.impact_score+'. Tu khoa: '+data.matched_keywords.join(', ');
         document.getElementById('f').reset();
