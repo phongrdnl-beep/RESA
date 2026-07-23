@@ -81,7 +81,7 @@ ANCHORS: List[Tuple[date, float, float]] = [
 ]
 
 
-def _target_for(d: date) -> Tuple[float, float]:
+def _anchor_target_for(d: date) -> Tuple[float, float]:
     if d <= ANCHORS[0][0]:
         return ANCHORS[0][1], ANCHORS[0][2]
     if d >= ANCHORS[-1][0]:
@@ -94,6 +94,112 @@ def _target_for(d: date) -> Tuple[float, float]:
             frac = (d - d0).days / span
             return t0 + (t1 - t0) * frac, v0 + (v1 - v0) * frac
     return ANCHORS[-1][1], ANCHORS[-1][2]
+
+
+# --------------------------------------------------------------------------
+# Vietnamese lunar-calendar seasonal effects (computed once, via the
+# `lunarcalendar` package, against the actual Tet / thang-7-am-lich dates
+# for 2017-2026 - not approximated).
+#
+#  - Tet + thang Gieng (lunar month 1): the whole country is on holiday;
+#    real-estate deal-closing traditionally pauses until thang Gieng ends
+#    ("thang Gieng la thang an choi") - the deepest, widest dip of the year.
+#  - Thang 7 am lich ("thang co hon" / ghost month): a widespread
+#    superstition against major purchases (real estate, cars...) causes a
+#    real, smaller annual dip.
+#
+# Both dips use a smoothstep ramp (zero-derivative S-curve) in and out, so
+# the transition is gradual rather than a step change - and because the two
+# dips repeat every lunar year at roughly fixed points in the solar-year
+# cycle, the resulting curve reads as a smooth, wave-like (sine-like)
+# oscillation when viewed at the year/all-time zoom level.
+#
+# Only the sentiment TARGET is adjusted here - article volume/day-weights
+# are untouched, so "bao chi van len tin deu" (news keeps publishing at its
+# normal rate) even during thang co hon; only the tone shifts bearish.
+# --------------------------------------------------------------------------
+
+LUNAR_EVENTS: List[Tuple[date, date, date, date, float]] = []
+
+
+def _smoothstep(t: float) -> float:
+    t = max(0.0, min(1.0, t))
+    return t * t * (3 - 2 * t)
+
+
+def _event_adjustment(d: date, ramp_down_start: date, trough_start: date,
+                       trough_end: date, ramp_up_end: date, magnitude: float) -> float:
+    if d < ramp_down_start or d > ramp_up_end:
+        return 0.0
+    if d < trough_start:
+        span = (trough_start - ramp_down_start).days or 1
+        frac = (d - ramp_down_start).days / span
+        return magnitude * _smoothstep(frac)
+    if d <= trough_end:
+        return magnitude
+    span = (ramp_up_end - trough_end).days or 1
+    frac = (d - trough_end).days / span
+    return magnitude * (1 - _smoothstep(frac))
+
+
+def _add_tet_event(tet_date: date, thang_gieng_end: date, magnitude: float = -20.0) -> None:
+    LUNAR_EVENTS.append((
+        tet_date - timedelta(days=14),
+        tet_date - timedelta(days=2),
+        thang_gieng_end,
+        thang_gieng_end + timedelta(days=12),
+        magnitude,
+    ))
+
+
+def _add_cohon_event(start: date, end: date, magnitude: float = -12.0) -> None:
+    LUNAR_EVENTS.append((
+        start - timedelta(days=7),
+        start,
+        end,
+        end + timedelta(days=7),
+        magnitude,
+    ))
+
+
+# Tet (mung 1 Tet) -> thang Gieng end, sourced from the Vietnamese lunar
+# calendar for each year in range.
+_add_tet_event(date(2017, 1, 28), date(2017, 2, 25))
+_add_tet_event(date(2018, 2, 16), date(2018, 3, 16))
+_add_tet_event(date(2019, 2, 5), date(2019, 3, 6))
+_add_tet_event(date(2020, 1, 25), date(2020, 2, 22))
+_add_tet_event(date(2021, 2, 12), date(2021, 3, 12))
+_add_tet_event(date(2022, 2, 1), date(2022, 3, 2))
+_add_tet_event(date(2023, 1, 22), date(2023, 2, 19))
+_add_tet_event(date(2024, 2, 10), date(2024, 3, 9))
+_add_tet_event(date(2025, 1, 29), date(2025, 2, 27))
+_add_tet_event(date(2026, 2, 17), date(2026, 3, 18))
+
+# Thang 7 am lich (mung 1 -> ngay cuoi thang 7 am lich).
+_add_cohon_event(date(2017, 8, 22), date(2017, 9, 19))
+_add_cohon_event(date(2018, 8, 11), date(2018, 9, 9))
+_add_cohon_event(date(2019, 8, 1), date(2019, 8, 29))
+_add_cohon_event(date(2020, 8, 19), date(2020, 9, 16))
+_add_cohon_event(date(2021, 8, 8), date(2021, 9, 6))
+_add_cohon_event(date(2022, 7, 29), date(2022, 8, 26))
+_add_cohon_event(date(2023, 8, 16), date(2023, 9, 14))
+_add_cohon_event(date(2024, 8, 4), date(2024, 9, 2))
+_add_cohon_event(date(2025, 8, 23), date(2025, 9, 21))
+# Thang co hon 2026 starts 13/08/2026, after our data range (ends 25/07/2026).
+
+
+def _lunar_seasonal_adjustment(d: date) -> float:
+    total = 0.0
+    for ramp_down_start, trough_start, trough_end, ramp_up_end, magnitude in LUNAR_EVENTS:
+        total += _event_adjustment(d, ramp_down_start, trough_start, trough_end, ramp_up_end, magnitude)
+    return total
+
+
+def _target_for(d: date) -> Tuple[float, float]:
+    base_target, vol = _anchor_target_for(d)
+    target = base_target + _lunar_seasonal_adjustment(d)
+    target = max(3.0, min(97.0, target))
+    return target, vol
 
 
 BULLISH_PHRASES = [
@@ -140,6 +246,17 @@ EUPHORIA_BULLISH_BONUS = [
     "Nha dau tu FOMO do xo xuong tien tai {loc} bat chap gia cao",
 ]
 
+TET_BEARISH_BONUS = [
+    "Thi truong {ptype} {loc} tram lang mua Tet, nguoi dan lo don xuan",
+    "Giao dich {ptype} tai {loc} dong bang dip Tet Nguyen Dan",
+    "Thang Gieng la thang an choi, giao dich {ptype} {loc} gan nhu dung lai",
+]
+
+COHON_BEARISH_BONUS = [
+    "Thang co hon, nha dau tu {loc} kieng ky xuong tien mua {ptype}",
+    "Giao dich {ptype} tai {loc} cham han do quan niem thang 7 am lich",
+]
+
 LOCATIONS = [
     "TP.HCM", "Ha Noi", "Da Nang", "Binh Duong", "Long An", "Can Tho",
     "Nha Trang", "Hai Phong", "Quang Ninh", "Dong Nai", "Ba Ria - Vung Tau",
@@ -175,11 +292,29 @@ def _label_probs(target: float, vol: float, rng: random.Random) -> Tuple[float, 
     return bullish_pct / total * 100, neutral_pct / total * 100, bearish_pct / total * 100
 
 
+def _in_tet_window(d: date) -> bool:
+    for _rd, ts, te, _ru, mag in LUNAR_EVENTS:
+        if mag == -20.0 and ts <= d <= te:
+            return True
+    return False
+
+
+def _in_cohon_window(d: date) -> bool:
+    for _rd, ts, te, _ru, mag in LUNAR_EVENTS:
+        if mag == -12.0 and ts <= d <= te:
+            return True
+    return False
+
+
 def _make_title(score: float, label: str, d: date, rng: random.Random) -> str:
     loc = rng.choice(LOCATIONS)
     ptype = rng.choice(PROPERTY_TYPES)
     pool = BULLISH_PHRASES if label == "Bullish" else (BEARISH_PHRASES if label == "Bearish" else NEUTRAL_PHRASES)
-    if d.year == 2020 and label == "Bearish" and rng.random() < 0.5:
+    if label == "Bearish" and _in_tet_window(d) and rng.random() < 0.5:
+        pool = TET_BEARISH_BONUS
+    elif label == "Bearish" and _in_cohon_window(d) and rng.random() < 0.5:
+        pool = COHON_BEARISH_BONUS
+    elif d.year == 2020 and label == "Bearish" and rng.random() < 0.5:
         pool = COVID_BEARISH_BONUS
     if d.year == 2025 and label == "Bullish" and rng.random() < 0.4:
         pool = EUPHORIA_BULLISH_BONUS
@@ -234,6 +369,11 @@ def generate_simulated_articles(total: int = None, seed: int = 2017) -> List[dic
         running += w
         cum_weights.append(running)
 
+    # Precompute the (target, vol) for each unique day once - _target_for()
+    # is deterministic per day, and recomputing it per-sample (hundreds of
+    # thousands of times) is wasteful since many samples land on the same day.
+    target_cache = {dd: _target_for(dd) for dd in all_days}
+
     articles = []
     idx = 0
     source_keys = list(SOURCE_WEIGHTS.keys())
@@ -250,7 +390,7 @@ def generate_simulated_articles(total: int = None, seed: int = 2017) -> List[dic
                 hi = mid
         d = all_days[lo]
 
-        target, vol = _target_for(d)
+        target, vol = target_cache[d]
         bullish_pct, neutral_pct, bearish_pct = _label_probs(target, vol, rng)
         label = rng.choices(
             ["Bullish", "Neutral", "Bearish"],
