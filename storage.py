@@ -168,3 +168,27 @@ def total_article_count(db_path: str = DB_PATH) -> int:
     with get_conn(db_path) as conn:
         row = conn.execute("SELECT COUNT(*) AS n FROM articles").fetchone()
     return row["n"] if row else 0
+
+
+def get_latest_published_at(db_path: str = DB_PATH) -> Optional[str]:
+    """Latest published_at across all stored articles (ISO string), or None
+    if the table is empty. Used to anchor 'recent activity' windows to the
+    dataset's own timeline instead of real wall-clock time - important for
+    historical/simulated data where 'fetched_at' or 'now' has no relation
+    to the narrative date being represented."""
+    with get_conn(db_path) as conn:
+        row = conn.execute("SELECT MAX(published_at) AS m FROM articles").fetchone()
+    return row["m"] if row and row["m"] else None
+
+
+def count_articles_published_since(iso_datetime: str, db_path: str = DB_PATH) -> int:
+    """Like count_articles_since, but filters on published_at (the article's
+    own real/simulated date) rather than fetched_at (when our server pulled
+    it in). Combine with get_latest_published_at() to get a 'most recent
+    window of the dataset' count that works for both live and historical
+    data."""
+    with get_conn(db_path) as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM articles WHERE published_at >= ?", (iso_datetime,)
+        ).fetchone()
+    return row["n"] if row else 0

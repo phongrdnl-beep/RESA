@@ -187,13 +187,31 @@ def _make_title(score: float, label: str, d: date, rng: random.Random) -> str:
     return template.format(loc=loc, ptype=ptype)
 
 
+# Explicit per-year sample quotas - deliberately front-loaded low (mirrors a
+# thin online-data era) and growing sharply toward the present (mirrors the
+# real growth of Vietnamese digital media/forum/listing volume). 2026 is a
+# partial year (only Jan 1 -> Jul 25), so its quota is a partial-year amount,
+# not an annualized one. Total ~= 318k (roughly 4x the previous ~93.5k batch).
+ANNUAL_TARGETS: Dict[int, int] = {
+    2017: 9500,
+    2018: 9900,
+    2019: 13100,
+    2020: 17300,
+    2021: 22900,
+    2022: 30300,
+    2023: 40000,
+    2024: 53000,
+    2025: 70000,
+    2026: 52300,  # partial year (Jan 1 - Jul 25)
+}
+
+
 def generate_simulated_articles(total: int = None, seed: int = 2017) -> List[dict]:
     """Returns a list of raw article-like dicts (same shape as ingestion.RawArticle
     plus sentiment fields) covering START_DATE..END_DATE, following the ANCHORS
-    narrative curve. Deterministic given `seed`."""
+    narrative curve. Sample volume per year follows ANNUAL_TARGETS (low in
+    2017-2018, growing steadily toward 2025-2026). Deterministic given `seed`."""
     rng = random.Random(seed)
-    if total is None:
-        total = rng.randint(80500, 125400)
 
     all_days = []
     d = START_DATE
@@ -201,10 +219,15 @@ def generate_simulated_articles(total: int = None, seed: int = 2017) -> List[dic
         all_days.append(d)
         d += timedelta(days=1)
 
-    # More recent years get proportionally more samples (mirrors growth of
-    # online real-estate content/data volume over time).
-    day_weights = [1.0 + 0.15 * (dd.year - START_DATE.year) for dd in all_days]
+    days_per_year: Dict[int, int] = {}
+    for dd in all_days:
+        days_per_year[dd.year] = days_per_year.get(dd.year, 0) + 1
+
+    day_weights = [ANNUAL_TARGETS.get(dd.year, 0) / days_per_year[dd.year] for dd in all_days]
     total_weight = sum(day_weights)
+    if total is None:
+        total = sum(ANNUAL_TARGETS.values())
+
     cum_weights = []
     running = 0.0
     for w in day_weights:

@@ -98,6 +98,7 @@ class SummaryResponse(BaseModel):
     sentiment_score: float
     wow_change_percent: float
     articles_24h: int
+    total_articles: int
     state: str
     state_color: str
     updated_at: str
@@ -205,12 +206,32 @@ def _real_trend(range_key: RangeKey, db_path: str = storage.DB_PATH) -> TrendRes
     )
 
 
+def _recent_articles_count(db_path: str, window_hours: int = 48) -> int:
+    """Count articles in the most recent `window_hours` of the dataset's OWN
+    timeline (anchored to the latest published_at actually stored), not real
+    wall-clock 'now'. For live real data this still means 'freshly seen', but
+    it also works correctly for historical/simulated data where 'now' has no
+    relation to the narrative date - previously this used real UTC time and
+    returned near-zero for anything not ingested in the last real 24h."""
+    latest = storage.get_latest_published_at(db_path)
+    if not latest:
+        return 0
+    try:
+        latest_dt = datetime.fromisoformat(latest.replace("Z", "+00:00"))
+    except ValueError:
+        return 0
+    since = (latest_dt - timedelta(hours=window_hours)).isoformat()
+    return storage.count_articles_published_since(since, db_path)
+
+
 def _real_summary(db_path: str = storage.DB_PATH) -> SummaryResponse:
     all_days = storage.get_daily_summaries(db_path)
+    total_articles = storage.total_article_count(db_path)
     if not all_days:
         state, color = _state_for(50.0)
         return SummaryResponse(
             sentiment_score=50.0, wow_change_percent=0.0, articles_24h=0,
+            total_articles=total_articles,
             state=state, state_color=color,
             updated_at=datetime.now(timezone.utc).isoformat(),
             data_points_available=0, is_limited_history=True,
@@ -224,11 +245,11 @@ def _real_summary(db_path: str = storage.DB_PATH) -> SummaryResponse:
     wow = round(((score - prev) / prev) * 100, 1) if prev else 0.0
     state, color = _state_for(score)
 
-    since = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
-    articles_24h = storage.count_articles_since(since, db_path)
+    articles_recent = _recent_articles_count(db_path, window_hours=48)
 
     return SummaryResponse(
-        sentiment_score=score, wow_change_percent=wow, articles_24h=articles_24h,
+        sentiment_score=score, wow_change_percent=wow, articles_24h=articles_recent,
+        total_articles=total_articles,
         state=state, state_color=color,
         updated_at=datetime.now(timezone.utc).isoformat(),
         data_points_available=len(all_days), is_limited_history=len(all_days) < 8,

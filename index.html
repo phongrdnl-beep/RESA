@@ -115,11 +115,27 @@
 
   <div style="background:var(--card-bg);border:1px solid rgba(255,176,0,0.35);clip-path:polygon(10px 0,100% 0,100% calc(100% - 10px),calc(100% - 10px) 100%,0 100%,0 10px);padding:14px 16px;position:relative;">
     <div style="position:absolute;top:6px;right:8px;width:10px;height:10px;border-top:1px solid var(--amber);border-right:1px solid var(--amber);opacity:0.6;"></div>
-    <div style="font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:var(--text-sub);margin-bottom:6px;">Bài viết quét được (24h)</div>
+    <div style="font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:var(--text-sub);margin-bottom:6px;">Bài viết quét được (48h gần nhất)</div>
     <div style="font-size:30px;font-weight:700;color:var(--amber);line-height:1;" id="resd-articles-count">-----</div>
     <div style="font-size:12px;color:var(--text-sub);margin-top:4px;">Báo chí, diễn đàn, MXH, rao vặt</div>
   </div>
 
+  <div style="background:var(--card-bg);border:1px solid rgba(177,92,255,0.35);clip-path:polygon(10px 0,100% 0,100% calc(100% - 10px),calc(100% - 10px) 100%,0 100%,0 10px);padding:14px 16px;position:relative;">
+    <div style="position:absolute;top:6px;right:8px;width:10px;height:10px;border-top:1px solid var(--violet);border-right:1px solid var(--violet);opacity:0.6;"></div>
+    <div style="font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:var(--text-sub);margin-bottom:6px;">Tổng số mẫu thu thập được</div>
+    <div style="font-size:30px;font-weight:700;color:var(--violet);line-height:1;" id="resd-total-articles">-----</div>
+    <div style="font-size:12px;color:var(--text-sub);margin-top:4px;" id="resd-total-articles-sub">Toàn bộ lịch sử đã lưu trữ</div>
+  </div>
+
+</div>
+
+<div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;flex-wrap:wrap;">
+  <span style="font-size:11px;letter-spacing:1px;text-transform:uppercase;color:var(--text-sub);">Nguồn dữ liệu:</span>
+  <div id="resd-source-toggle" style="display:flex;gap:6px;">
+    <button data-mode="real" style="font-family:inherit;cursor:pointer;font-size:11px;letter-spacing:1px;text-transform:uppercase;padding:5px 14px;background:rgba(98,215,255,0.15);color:var(--cyan);border:1px solid var(--cyan);clip-path:polygon(6px 0,100% 0,100% calc(100% - 6px),calc(100% - 6px) 100%,0 100%,0 6px);">Dữ liệu thật</button>
+    <button data-mode="simulation" style="font-family:inherit;cursor:pointer;font-size:11px;letter-spacing:1px;text-transform:uppercase;padding:5px 14px;background:transparent;color:var(--text-sub);border:1px solid var(--border-c);clip-path:polygon(6px 0,100% 0,100% calc(100% - 6px),calc(100% - 6px) 100%,0 100%,0 6px);">Dữ liệu mô phỏng (2017-2026)</button>
+  </div>
+  <span id="resd-mode-note" style="font-size:11px;color:var(--text-sub);"></span>
 </div>
 
 <div style="background:var(--card-bg);border:1px solid var(--border-c);padding:16px;margin-bottom:16px;position:relative;">
@@ -250,6 +266,7 @@ function applySummary(summary){
   wow.textContent=sign+summary.wow_change_percent.toFixed(1)+'%';
   wow.style.color=summary.wow_change_percent>=0?GREEN:RED;
   document.getElementById('resd-articles-count').textContent=summary.articles_24h.toLocaleString('vi-VN');
+  document.getElementById('resd-total-articles').textContent=(summary.total_articles||0).toLocaleString('vi-VN');
   document.getElementById('resd-updated-at').textContent='Market Sentiment Index — Cập nhật '+summary.updated_at;
   var face=document.getElementById('resd-face-panel');
   var head=document.getElementById('resd-face-head');
@@ -342,23 +359,63 @@ async function fetchJSON(path){
   return res.json();
 }
 
+var currentMode='real';
+var currentRange='30d';
+var DEFAULT_RANGE_BY_MODE={real:'30d',simulation:'year'};
+
+function modePrefix(){ return currentMode==='simulation' ? '/simulation' : ''; }
+
+function setModeNote(){
+  var note=document.getElementById('resd-mode-note');
+  note.textContent = currentMode==='simulation'
+    ? 'DỮ LIỆU MÔ PHỎNG (Q1/2017 - 25/07/2026) — không phải dữ liệu thật, dùng để xem trước biểu đồ dài hạn.'
+    : '';
+}
+
+function setRangeButtonActive(rangeKey){
+  currentRange=rangeKey;
+  rangeButtons.forEach(function(b){
+    var active = b.getAttribute('data-range')===rangeKey;
+    b.style.background = active ? 'rgba(98,215,255,0.15)' : 'transparent';
+    b.style.color = active ? CYAN : SUB;
+    b.style.borderColor = active ? CYAN : 'rgba(180,200,220,0.25)';
+  });
+}
+
 var rangeButtons=document.querySelectorAll('#resd-range-buttons button');
 rangeButtons.forEach(function(btn){
   btn.addEventListener('click',async function(){
-    rangeButtons.forEach(function(b){b.style.background='transparent';b.style.color=SUB;b.style.borderColor='rgba(180,200,220,0.25)';});
-    btn.style.background='rgba(98,215,255,0.15)';btn.style.color=CYAN;btn.style.borderColor=CYAN;
     var rangeKey=btn.getAttribute('data-range');
+    setRangeButtonActive(rangeKey);
     try{
-      updateChart(await fetchJSON('/trend?range='+rangeKey));
+      updateChart(await fetchJSON(modePrefix()+'/trend?range='+rangeKey));
     }catch(e){
       setStatus(false,e.message);
     }
   });
 });
 
-async function init(){
+var modeButtons=document.querySelectorAll('#resd-source-toggle button');
+modeButtons.forEach(function(btn){
+  btn.addEventListener('click',async function(){
+    var mode=btn.getAttribute('data-mode');
+    if(mode===currentMode) return;
+    currentMode=mode;
+    modeButtons.forEach(function(b){
+      var active=b.getAttribute('data-mode')===mode;
+      b.style.background = active ? 'rgba(98,215,255,0.15)' : 'transparent';
+      b.style.color = active ? CYAN : SUB;
+      b.style.borderColor = active ? CYAN : 'rgba(180,200,220,0.25)';
+    });
+    setModeNote();
+    await loadDashboard(DEFAULT_RANGE_BY_MODE[mode]);
+  });
+});
+
+async function loadDashboard(rangeKey){
+  setRangeButtonActive(rangeKey);
   try{
-    var dash=await fetchJSON('/dashboard?range=30d');
+    var dash=await fetchJSON(modePrefix()+'/dashboard?range='+rangeKey);
     applySummary(dash.summary);
     applySources(dash.sources);
     applyNews(dash.top_news.items);
@@ -369,6 +426,11 @@ async function init(){
     document.getElementById('resd-gauge-state').textContent='Không có dữ liệu';
     document.getElementById('resd-updated-at').textContent='Không kết nối được API — kiểm tra lại server Render.';
   }
+}
+
+function init(){
+  setModeNote();
+  loadDashboard(DEFAULT_RANGE_BY_MODE[currentMode]);
 }
 init();
 })();
