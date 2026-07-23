@@ -41,6 +41,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 import ingestion
+import simulate_history
 import storage
 import trends
 from pipeline import run_ingestion
@@ -82,6 +83,10 @@ def _startup():
         run_ingestion()
     except Exception as exc:  # never let a flaky feed take the whole API down
         print("Startup ingestion failed (will retry on next /ingest/run or scheduled call):", exc)
+    try:
+        simulate_history.populate_if_empty()
+    except Exception as exc:  # simulation data is cosmetic - never block real startup
+        print("Startup simulation populate failed:", exc)
 
 
 # --------------------------------------------------------------------------
@@ -175,9 +180,9 @@ def _fmt_label(d_str: str, short: bool) -> str:
     return f"{d.day}/{d.month}" if short else f"{d.month}/{d.year}"
 
 
-def _real_trend(range_key: RangeKey) -> TrendResponse:
+def _real_trend(range_key: RangeKey, db_path: str = storage.DB_PATH) -> TrendResponse:
     days_wanted = RANGE_DAYS[range_key]
-    all_days = storage.get_daily_summaries()
+    all_days = storage.get_daily_summaries(db_path)
     subset = all_days[-days_wanted:] if days_wanted < len(all_days) else all_days
 
     bullish = [d["bullish_pct"] for d in subset]
@@ -200,8 +205,8 @@ def _real_trend(range_key: RangeKey) -> TrendResponse:
     )
 
 
-def _real_summary() -> SummaryResponse:
-    all_days = storage.get_daily_summaries()
+def _real_summary(db_path: str = storage.DB_PATH) -> SummaryResponse:
+    all_days = storage.get_daily_summaries(db_path)
     if not all_days:
         state, color = _state_for(50.0)
         return SummaryResponse(
@@ -220,7 +225,7 @@ def _real_summary() -> SummaryResponse:
     state, color = _state_for(score)
 
     since = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
-    articles_24h = storage.count_articles_since(since)
+    articles_24h = storage.count_articles_since(since, db_path)
 
     return SummaryResponse(
         sentiment_score=score, wow_change_percent=wow, articles_24h=articles_24h,
@@ -230,12 +235,12 @@ def _real_summary() -> SummaryResponse:
     )
 
 
-def _real_sources() -> SourceDistributionResponse:
+def _real_sources(db_path: str = storage.DB_PATH) -> SourceDistributionResponse:
     """Status is computed from what's ACTUALLY in storage, not from static
     connector config - a source only shows 'live' once it genuinely has
     real articles stored, whether they arrived via an automated connector
     (RSS, YouTube) or a manual /api/v1/contribute submission."""
-    counts = storage.get_source_counts()
+    counts = storage.get_source_counts(db_path)
     total = sum(counts.values())
     items = []
     for key, meta in SOURCE_META.items():
@@ -249,8 +254,8 @@ def _real_sources() -> SourceDistributionResponse:
     return SourceDistributionResponse(total_articles=total, sources=items)
 
 
-def _real_top_news(limit: int) -> TopNewsResponse:
-    rows = storage.get_top_articles(limit=limit)
+def _real_top_news(limit: int, db_path: str = storage.DB_PATH) -> TopNewsResponse:
+    rows = storage.get_top_articles(db_path=db_path, limit=limit)
     items = [
         NewsItem(
             title=r["title"], link=r["link"],
@@ -452,6 +457,64 @@ def get_search_interest(keywords: Optional[str] = Query(None, description="Comma
     tin hieu bo sung). keywords rong = dung bo tu khoa mac dinh."""
     kw_list = [k.strip() for k in keywords.split(",")] if keywords else None
     return trends.get_search_interest(kw_list)
+
+
+# --------------------------------------------------------------------------
+# SIMULATION endpoints - a long-run (Q1/2017 -> 25/07/2026) synthetic dataset
+# following a market-cycle narrative (see simulate_history.py), stored in a
+# separate DB file and NEVER mixed with the real pipeline. Every response
+# carries is_simulated=True and a plain-language note so it can never be
+# mistaken for real market data.
+# --------------------------------------------------------------------------
+
+_SIM_NOTE = ("DU LIEU MO PHONG (khong phai du lieu that) - tai hien mot chu ky "
+             "tam ly thi truong tu Q1/2017 den 25/07/2026 theo kich ban do nguoi "
+             "dung mo ta, dung de demo/kiem thu bieu do, khong dung de ra quyet dinh.")
+
+
+@app.get("/api/v1/simulation/summary")
+def get_simulation_summary():
+    data = _real_summary(simulate_history.SIM_DB_PATH).model_dump()
+    return {**data, "is_simulated": True, "note": _SIM_NOTE}
+
+
+@app.get("/api/v1/simulation/trend")
+def get_simulation_trend(range: RangeKey = Query("all", description="30d | month | quarter | year | all")):
+    data = _real_trend(range, simulate_history.SIM_DB_PATH).model_dump()
+    return {**data, "is_simulated": True, "note": _SIM_NOTE}
+
+
+@app.get("/api/v1/simulation/sources")
+def get_simulation_sources():
+    data = _real_sources(simulate_history.SIM_DB_PATH).model_dump()
+    return {**data, "is_simulated": True, "note": _SIM_NOTE}
+
+
+@app.get("/api/v1/simulation/news/top")
+def get_simulation_top_news(limit: int = Query(5, ge=1, le=20)):
+    data = _real_top_news(limit, simulate_history.SIM_DB_PATH).model_dump()
+    return {**data, "is_simulated": True, "note": _SIM_NOTE}
+
+
+@app.get("/api/v1/simulation/dashboard")
+def get_simulation_dashboard(range: RangeKey = Query("all"), news_limit: int = Query(5, ge=1, le=20)):
+    return {
+        "summary": _real_summary(simulate_history.SIM_DB_PATH).model_dump(),
+        "trend": _real_trend(range, simulate_history.SIM_DB_PATH).model_dump(),
+        "sources": _real_sources(simulate_history.SIM_DB_PATH).model_dump(),
+        "top_news": _real_top_news(news_limit, simulate_history.SIM_DB_PATH).model_dump(),
+        "is_simulated": True,
+        "note": _SIM_NOTE,
+    }
+
+
+@app.post("/api/v1/simulation/regenerate")
+def regenerate_simulation(x_contribute_token: Optional[str] = Header(None)):
+    """Force-regenerate the simulated dataset (same seed -> same output).
+    Protected by the same CONTRIBUTE_TOKEN so random visitors can't trigger
+    repeated regeneration (harmless but pointless load)."""
+    _check_contribute_token(x_contribute_token)
+    return simulate_history.populate_if_empty(force=True)
 
 
 # --------------------------------------------------------------------------
